@@ -9,3 +9,4 @@ It includes R code and analysis for building classification models to predict fe
 - R project file
 
 Submitted by: Joel James
+**GitHub Repository Link:** [https://github.com/joeljames96/hw3-part2-f25](https://github.com/joeljames96/hw3-part2-f25)
