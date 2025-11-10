@@ -1,0 +1,795 @@
+---
+title: "HW3-Part 2-Classification models"
+author: "James"
+date: "November 8, 2025"
+format: 
+  html:
+    embed-resources: true
+---
+
+## Step 1 - Familiarize yourself with the data and the assignment
+
+Save this file as a new Quarto Markdown document and name it something that
+includes your last name in the filename. Save it into the
+same folder as this file. Create a new R Studio Project based on this folder.
+
+This assignment will focus on building simple classification models for
+predicting fetal health based on a number of clinical measurements known
+as *cardiotocographic data*. 
+
+The following introductory information was taken from the main
+[Kaggle Dataset page](https://www.kaggle.com/andrewmvd/fetal-health-classification) for this data:
+
+
+>    **Context**
+
+> Reduction of child mortality is reflected in several of the United Nations' Sustainable Development Goals and is a key indicator of human progress. The UN expects that by 2030, countries end preventable deaths of newborns and children under 5 years of age, with all countries aiming to reduce under‑5 mortality to at least as low as 25 per 1,000 live births.
+> 
+Parallel to notion of child mortality is of course maternal mortality, which accounts for 295 000 deaths during and following pregnancy and childbirth (as of 2017). The vast majority of these deaths (94%) occurred in low-resource settings, and most could have been prevented.
+>
+> In light of what was mentioned above, Cardiotocograms (CTGs) are a simple and cost accessible option to assess fetal health, allowing healthcare professionals to take action in order to prevent child and maternal mortality. The equipment itself works by sending ultrasound pulses and reading its response, thus shedding light on fetal heart rate (FHR), fetal movements, uterine contractions and more.
+>
+> **Data**
+>
+> This dataset contains 2126 records of features extracted from Cardiotocogram exams, which were then classified by three expert obstetritians into 3 classes:
+
+> * Normal
+> * Suspect
+> * Pathological
+
+The definitions of the columns are:
+
+    * baseline value - FHR baseline (beats per minute)
+    * accelerations - Number of accelerations per second
+    * fetal_movement - Number of fetal movements per second
+    * uterine_contractions - Number of uterine contractions per second
+    * light_decelerations - Number of light decelerations per second
+    * severe_decelerations - Number of severe decelerations per second
+    * prolongued_decelerations - Number of prolonged decelerations per second
+    * abnormal_short_term_variability - Percentage of time with abnormal short term variability
+    * mean_value_of_short_term_variability - Mean value of short term variability
+    * percentage_of_time_with_abnormal_long_term_variability - Percentage of time with abnormal long term variability
+    * mean_value_of_long_term_variability - Mean value of long term variability
+    * histogram_width - Width of FHR histogram
+    * histogram_min - Minimum (low frequency) of FHR histogram
+    * histogram_max - Maximum (high frequency) of FHR histogram
+    * histogram_number_of_peaks - Number of histogram peaks
+    * histogram_number_of_zeroes - Number of histogram zeros
+    * histogram_mode - Histogram mode
+    * histogram_mean - Histogram mean
+    * histogram_median - Histogram median
+    * histogram_variance - Histogram variance
+    * histogram_tendency - Histogram tendency
+
+You can learn much more about the study behind this dataset from the following
+published paper:
+
+* https://www.ncbi.nlm.nih.gov/pmc/articles/PMC6822315/
+
+While in the original study and dataset, there were three classes for the
+target variable (Normal, Suspect, Pathological), we will convert this to
+a binary classification problem where 1 will be Suspect or Pathological and
+0 will be Normal. Multi-class problems are a bit beyond the scope of this
+introduction to classification problems.
+
+```{r libraries}
+library(dplyr)   # Group by analysis and other SQLish things.
+library(ggplot2) # Plotting, of course
+library(tidyr)   # Data reshaping
+library(tidymodels)   # Many aspects of predictive modeling
+library(corrplot)  # Correlation plots
+library(skimr)       # An automated EDA tool (you saw this in a previous assignment)
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(vip)
+```
+
+## Step 2 - Load data
+
+You'll notice that there is a subfolder named **data**.
+Inside of it you'll find the data file for this assignment:
+
+- **fetal_health.csv**
+
+
+### Load the data
+
+```{r load_data}
+fetal_health <- read.csv("./data/fetal_health.csv")
+```
+
+Our target variable will be based on the `fetal_health` variable. Let's check the current values.
+
+```{r}
+table(fetal_health$fetal_health)
+```
+
+Now we will recode the 1's as a 0 and the 2's and 3's as a 1. I'm going to do this in a new column
+so that we can check and make sure we've got it right.
+
+```{r}
+fetal_health$b_fetal_health <- fetal_health$fetal_health
+fetal_health$b_fetal_health[fetal_health$b_fetal_health == 1] <- 0
+fetal_health$b_fetal_health[fetal_health$b_fetal_health >= 2] <- 1
+
+table(fetal_health$b_fetal_health, fetal_health$fetal_health)
+```
+
+Looks good, let's drop the original `fetal_health` column and convert the b_fetal_health` column
+to a factor. I'm explicitly setting the order of the factor levels so that "0" is the first level just
+so there's no confusion.
+
+```{r}
+fetal_health <- fetal_health  |>  
+  select (!fetal_health) 
+
+fetal_health$b_fetal_health <- factor(fetal_health$b_fetal_health, levels=c("0", "1"))
+```
+
+Find the number of patients and the percentage of patients for the two fetal health levels - 1 and 2. You'll
+see that there are about 78% of the patients with a normal fetal health assessment (i.e. `b_fetal_health` = 0)
+
+```{r target_prop_check}
+
+table(fetal_health$b_fetal_health)
+prop.table(table(fetal_health$b_fetal_health))
+
+```
+
+Use `str`, `summary`, and `skim` to get a sense of the data. Our response variable, the thing we will be trying to predict is `b_fetal_health`. 
+
+```{r firstlook}
+str(fetal_health)
+```
+
+
+
+```{r}
+summary(fetal_health)
+```
+
+```{r}
+skim(fetal_health)
+```
+
+## Step 3 - Data partitioning
+
+Ok, it's time to do an initial split of our data into training and test datasets.
+
+For data partitioning, we will use the [rsample](https://rsample.tidymodels.org/) package. Let's allocate 80% of the records to our training set and 20% to the test set. Make sure you specify the `strata = ` argument. After partitioning, confirm that the `b_fetal_health` proportions of 1's and 0's are as expected. Discuss.
+
+```{r partitioning_soln}
+
+set.seed(983)          # keep this exactly
+
+pct_train <- 0.8       # 80% of data for training
+
+# create 80/20 stratified split on the binary outcome
+fetal_health_split <- rsample::initial_split(
+  fetal_health,
+  prop   = pct_train,
+  strata = b_fetal_health
+)
+
+# training and test data frames
+fetal_health_train <- training(fetal_health_split)
+fetal_health_test  <- testing(fetal_health_split)
+
+# check class proportions in each set
+prop.table(table(fetal_health_train$b_fetal_health))
+prop.table(table(fetal_health_test$b_fetal_health))
+
+```
+
+
+## Step 4 - EDA
+
+Do some EDA to try to uncover some relationships that may end up being
+useful in building a predictive model for `b_fetal_health`. You can only use the training data for this. You learned
+things in HW2 which should be useful here. In particular, you should at least do:
+
+- a correlation plot
+- faceted box or violin plots for all of the numeric variables with the target variable as the grouping variable,
+
+I'll give you a little help for each of these.
+
+### Correlation plot
+
+> We'll start with a correlation plot. The `tl.cex` argument helps us display the 
+plot by controlling the size of the text label. It's behavior is a little unpredictable but you can play around with various values. 
+
+```{r corrplot}
+
+# Use only numeric variables for correlation
+numeric_vars <- fetal_health_train %>%
+  select(-b_fetal_health)
+
+# Compute and visualize correlation matrix
+cor_matrix <- cor(numeric_vars)
+corrplot(cor_matrix,
+         method = "color",
+         type = "lower",
+         tl.cex = 0.6,
+         tl.col = "black",
+         order = "hclust")
+
+
+```
+
+
+> From the correlation map, a few variables seem to track each other quite closely. For example, short-term variability measures are strongly linked, and many of the histogram features rise and fall together. In plain terms, some columns describe the same underlying patterns, so we’ll need to be careful about using too many of them in one model.
+
+Now make a bunch of boxplots (or violin) that are grouped by the target variable. There are a few ways we can do this.
+ 
+Instead of creating separate plots for each variable, we could create
+a faceted plot, where we facet by the variable. To do this, we need to reshape
+our data from wide to long. We can do this using `tidyr::pivot_longer()`.
+
+```{r reshape_longer}
+
+fetal_health_long <- fetal_health_train %>%
+  pivot_longer(
+    cols = -b_fetal_health,      # all numeric variables except the target
+    names_to = "variable",       # name for the variable column
+    values_to = "value"          # name for the measurement column
+  )
+
+```
+
+Now we can create the faceted plot using the long data.
+
+```{r faceted_var_plot, fig.width=12, fig.height=16}
+
+fetal_health_long %>%
+  ggplot(aes(x = b_fetal_health, y = value, fill = b_fetal_health)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  facet_wrap(~ variable, scales = "free_y") +
+  labs(
+    title = "Distribution of Numeric Predictors by Fetal Health Status",
+    x = "Fetal Health",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    legend.position = "none"
+  )
+
+```
+
+> The boxplots reveal several meaningful differences between normal and abnormal fetal health cases.
+
+Variability features stand out most clearly — abnormal cases show higher values for abnormal_short_term_variability and lower values for mean_value_of_short_term_variability, which matches what we’d expect in less stable fetal heart rate patterns.
+
+Deceleration features (light_decelerations, severe_decelerations, and prolongued_decelerations) also tend to be slightly higher for abnormal outcomes, suggesting more frequent or severe heart rate drops.
+
+Acceleration and fetal movement variables are generally lower in abnormal cases, consistent with reduced fetal activity.
+
+Among the histogram-based measures, differences are subtler, but features like histogram_min, histogram_width, and histogram_number_of_peaks still show modest separation between the two groups.
+
+Overall, the variability- and contraction-related predictors appear to be the strongest indicators of fetal health status, while some of the histogram statistics seem less discriminative.
+
+## Step 5 - Building and evaluation of predictive classification models
+
+Now that you know a little more about the data, it's time to start building a
+few classification models for `b_fetal_health`. We will use:
+
+- logistic regression
+- a simple decision tree
+- a random forest
+
+
+We will start out using overall prediction accuracy
+as our metric but we might want to consider other metrics.
+
+**QUESTION** Why might overall prediction accuracy not be the most appropriate metric to consider? What other
+metrics might be important and why?
+
+>Accuracy alone doesn’t always tell the full story, especially when one class dominates the data. In this dataset, most cases are “Normal,” so a model that always predicts “Normal” would still seem 78% accurate but would completely miss the abnormal cases that actually matter. That’s why it’s important to also look at metrics like sensitivity (how well we catch abnormal cases), specificity (how well we identify normal ones), and other measures such as precision, F1-score, and ROC AUC for a more balanced evaluation.
+
+### The null model
+
+A very simple model would be to simply predict that `b_fetal_health` is equal to 0. On
+the training data we saw that we'd be ~78% accurate.
+
+**QUESTION** What is the sensitivity and specificity of the null model?
+
+> In the null model, the prediction is always “Normal.”
+That means it correctly identifies all the normal cases (so specificity = 1.0 or 100%) but misses every abnormal case (sensitivity = 0).
+In other words, it’s perfect at spotting healthy fetuses but completely useless for detecting potential problems.
+This is why any real model needs to do better — even if it sacrifices a little overall accuracy, it’s far more valuable if it can reliably flag abnormal cases.
+
+So, as we begin fitting more complicated models, remember that we need to
+outperform the null model to make it worth it to use more complicated models.
+
+
+### Model 1 -  logistic regression model
+
+For logistic regression, you must use tidymodels and you should see our class notes on logistic regression, in particular, the section titled "Logistic regression with tidymodels". For this modeling technique, you must:
+
+* fit at least two different logistic regression models, each of which should have at least five variables. For your first model, use variables that you think might have predictive value based on the EDA you did. For the second model, use all of the variables.
+* use 5-fold cross-validation as our resampling scheme for model fitting,
+* just take the default threshold value of 0.5,
+* assess the model's performance on the training data (accuracy, sensitivity, specificity, confusion matrix),
+* use the model to make predictions on the test data and assess the model's performance on the test data,
+* discuss the results.
+
+**HACKER EXTRA CREDIT** Create ROC curves and compute AUC for your logistic regression models. Discuss your interpretation of these plots.
+
+Start by creating a classification model object using the appropriate `engine = ` argument for logistic regression.
+
+```{r glm_spec}
+
+glm_spec <- logistic_reg(mode = "classification", engine = "glm")
+
+```
+
+
+Create a recipe for your first model which specifies the formula for your logistic regression model.
+
+```{r recipe_1}
+recipe_1 <-
+  recipe(b_fetal_health ~ baseline.value + accelerations + fetal_movement +
+           mean_value_of_short_term_variability +
+           abnormal_short_term_variability +
+           uterine_contractions,
+         data = fetal_health_train)
+
+
+```
+
+Now create a workflow object and the recipe and model to it.
+
+```{r}
+
+wf_1 <- workflow() %>%
+  add_recipe(recipe_1) %>%
+  add_model(glm_spec)
+
+```
+
+Now we'll create a folds object to use for k-crossfold validation.
+
+```{r}
+set.seed(259)
+fetal_health_folds <- vfold_cv(fetal_health_train, v = 5)
+ctrl_preds <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+```
+
+Now you should fit your logistic regression model using folds object we just created.
+
+```{r}
+
+# fit logistic regression (Model 1) with 5-fold CV
+fit_results_logreg1 <-
+  wf_1 %>%
+  fit_resamples(
+    resamples = fetal_health_folds,
+    control   = ctrl_preds
+  )
+
+```
+
+Now we can collect the metrics.
+
+```{r}
+collect_metrics(fit_results_logreg1)
+```
+
+Let's refit on entire training data set and make predictions on the test data. Recall from the notes that we use the `last_fit` function to do this. Then we can use the `yardstick` package to compute accuracy, sensitivity and specificity. 
+
+```{r}
+
+# Refit on full training data and evaluate on test data
+last_fit_logreg1 <- last_fit(wf_1, fetal_health_split)
+
+# Collect predictions from the test data
+final_predicted_classes_1 <- collect_predictions(last_fit_logreg1)
+
+# Accuracy
+acc_test_logreg1 <- yardstick::accuracy(final_predicted_classes_1,
+                                        truth = b_fetal_health,
+                                        estimate = .pred_class)
+
+# Sensitivity (Recall for abnormal cases)
+sens_test_logreg1 <- yardstick::sens(final_predicted_classes_1,
+                                     truth = b_fetal_health,
+                                     estimate = .pred_class,
+                                     event_level = "second")
+
+# Specificity
+spec_test_logreg1 <- yardstick::spec(final_predicted_classes_1,
+                                     truth = b_fetal_health,
+                                     estimate = .pred_class,
+                                     event_level = "second")
+
+# Combine metrics into one dataframe
+stats_test_logreg1 <- bind_rows(acc_test_logreg1,
+                                sens_test_logreg1,
+                                spec_test_logreg1) %>%
+  mutate(data = 'test',
+         model = 'logreg1')
+
+# Confusion matrix
+yardstick::conf_mat(final_predicted_classes_1,
+                    truth = b_fetal_health,
+                    estimate = .pred_class)
+
+# View summary metrics
+stats_test_logreg1
+
+```
+
+> The logistic regression model performs reasonably well, showing strong overall accuracy and a decent ability to identify abnormal fetal cases. The sensitivity values suggest it can detect a fair portion of non-normal cases, though not all, while specificity remains high, meaning normal cases are rarely misclassified. The confusion matrix indicates a small but noticeable number of false negatives, which are especially important in a medical context since missing an abnormal case could be risky.
+This suggests that while the model captures key relationships between fetal heart rate features (like baseline value, accelerations, and variability measures) and fetal health status, it may not fully capture more subtle patterns. Incorporating interaction terms, nonlinear models, or ensemble methods like random forests might help improve performance, especially in distinguishing borderline or complex cases.
+
+Let's fit a second model using all of the variables.
+
+```{r recipe_2}
+recipe_2 <-
+  recipe(b_fetal_health ~ ., 
+           data = fetal_health_train)
+
+# Create your workflow object and add the recipe and model
+
+wf_2 <- workflow() %>%
+  add_recipe(recipe_2) %>%
+  add_model(glm_spec)
+```
+
+Just like you did above, fit the model and assess its performance. Compare the results to the first logistic regression model. Use as many code chunks as needed.
+
+```{r logreg2_fit_results}
+
+# 5-fold CV for Model 2 (same folds & controls as Model 1)
+logreg2_fit_results <-
+  wf_2 %>%
+  fit_resamples(
+    resamples = fetal_health_folds,
+    control   = ctrl_preds
+  )
+
+collect_metrics(logreg2_fit_results)
+
+```
+
+> The second logistic regression model, which included all available predictors, performed slightly better than the first model. It achieved an average accuracy of about 0.905 and a ROC AUC of 0.96, indicating excellent ability to distinguish between normal and abnormal fetal health cases. The low Brier score (≈ 0.065) suggests that the model’s predicted probabilities are well-calibrated. Including more variables allowed the model to capture additional nuances in the data, but it also increases the risk of overfitting since some predictors may provide redundant information. Overall, the model shows strong predictive performance and reliable probability estimates, though its generalizability should still be confirmed on the test set.
+
+```{r}
+# ROC Curves and AUC
+
+# ROC curve for Model 1
+roc_logreg1 <- collect_predictions(fit_results_logreg1) %>%
+  roc_curve(truth = b_fetal_health, .pred_0) %>%
+  mutate(model = "Model 1 (Selected Variables)")
+
+# ROC curve for Model 2
+roc_logreg2 <- collect_predictions(logreg2_fit_results) %>%
+  roc_curve(truth = b_fetal_health, .pred_0) %>%
+  mutate(model = "Model 2 (All Variables)")
+
+# Combine and plot both ROC curves
+bind_rows(roc_logreg1, roc_logreg2) %>%
+  autoplot() +
+  ggtitle("ROC Curves for Logistic Regression Models") +
+  theme_minimal()
+```
+>The ROC curves for both logistic regression models show strong discriminative power, with the curve for Model 2 lying slightly above Model 1. The AUC for Model 2 (~0.96) is higher than Model 1 (~0.93), confirming that using all predictors improved the model’s ability to distinguish between normal and abnormal fetal health outcomes. The steep initial rise and the area near the top-left corner indicate that the model maintains high true-positive rates with relatively low false positives. Overall, the ROC curves suggest excellent model performance, and the improvement from Model 1 to Model 2 reflects the benefit of including a broader set of features.
+
+### Model 2 - a simple decision tree
+
+For this model, we will **NOT** use a resampling scheme (i.e. no k-fold cross-validation). We will just use our one simple train-test split. We'll use `rpart` for the engine, just as we did in the notes.
+
+Create your model specification.
+
+```{r tree_spec}
+
+tree_spec <-
+  decision_tree() %>%
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+
+```
+
+Let's fit a tree to the training data using just a few variables so that we
+can easily see what's going on.
+
+```{r tree1_fit}
+tree1_fit <- fit(tree_spec, b_fetal_health ~  
+           accelerations + 
+           baseline.value +
+           histogram_median + +
+           uterine_contractions, data = fetal_health_train)
+```
+
+Let's see what the fitted object looks like.
+
+```{r}
+tree1_fit
+```
+
+The `rpart.plot()` function lets us see the actual (upside down) tree. Since
+this function only works with `rpart` objects, we need to extract it from our
+`fit` object. 
+
+
+```{r tree1_plot}
+tree1_fit %>%
+  extract_fit_engine() %>%
+  rpart.plot(tweak = 1.2)
+```
+
+**QUESTION** Explain each of the values in the node in the third row from the top in the middle (light blue with values 0, 0.31 and 26%) What conditions need to be true for a case to end up in that node?
+
+> The node in the third row (light blue, with values 0, 0.31, and 26%) represents a subset of cases where:
+histogram_median >= 121,baseline.value < 140, and uterine_contractions < 0.0015.
+In this node:
+The “0” indicates that the majority class is normal fetal health (class 0).
+The “0.31” means that 31% of cases in this node were predicted as abnormal (class 1).
+The “26%” shows that this node represents about 26% of the total observations in the dataset.
+Essentially, these are fetal records with relatively low uterine contractions and moderate baseline heart rates, where most outcomes are normal but with a small proportion of abnormal cases still present.
+
+Now use `augment()` function along with `yardstick::sens()`, `yardstick::spec()`, and `yardstick::conf_mat()` to compute sensitivity, specificity, and the confusion matrix on the **training data**. In other words, we are just assessing how well the tree fits the data. 
+
+Notice in the code skeleton that I'm explicitly specifying the **yardstick** package and a function from it. I'm doing that because the `spec` function name clashes with another library we have loaded - you can see this by doing a `help(spec)`. Also notice that we need `event_level = "second"` since "0" comes before "1" in the factor levels for `b_fetal_health` and it's the "1"'s that are the thing we are trying to detect (abnormal results). We need `event_level = "second" for accuracy, sensitivity and specificity calculations (we don't need it for the confusion matrix).
+
+```{r tree1_metrics_train}
+
+# Get fitted classes & probabilities on TRAINING data
+tree_train_preds <- augment(tree1_fit, new_data = fetal_health_train)
+
+# Accuracy
+acc_tree_train <- yardstick::accuracy(
+  tree_train_preds,
+  truth   = b_fetal_health,
+  estimate = .pred_class
+)
+
+# Sensitivity (Abnormal as the event)
+sens_tree_train <- yardstick::sens(
+  tree_train_preds,
+  truth       = b_fetal_health,
+  estimate    = .pred_class,
+  event_level = "second"
+)
+
+# Specificity
+spec_tree_train <- yardstick::spec(
+  tree_train_preds,
+  truth       = b_fetal_health,
+  estimate    = .pred_class,
+  event_level = "second"
+)
+
+# Confusion matrix
+cm_tree_train <- yardstick::conf_mat(
+  tree_train_preds,
+  truth   = b_fetal_health,
+  estimate = .pred_class
+)
+
+# Combine into TRAIN metrics object
+stats_train_tree1 <- dplyr::bind_rows(
+  acc_tree_train,
+  sens_tree_train,
+  spec_tree_train
+) %>%
+  dplyr::mutate(data = "train", model = "tree1")
+
+stats_train_tree1
+cm_tree_train
+
+
+
+```
+
+
+**QUESTION** What is the predicted class and the probabilities of 0 and 1 for the very first row in `fetal_health_train`? **HINT** There is nothing to compute - you just need to look at the appropriate tibble and you've already used this tibble above.
+
+```{r explore_first_row}
+head(tree_train_preds, 1)
+
+```
+>The first observation was predicted as class 0 (normal) with a high probability (around 0.8), and a lower probability (around 0.2) for class 1 (abnormal). This means the model is fairly confident that the first case represents normal fetal health.
+
+Now, make predictions for the test data for this first tree and compute sensitivity, specificity and the confusion matrix. Remember (see notes) that you can use the `augment()` function to compute predicted values for the test data.
+
+
+```{r tree1_metrics_test}
+
+#  Make predictions on test data
+tree_test_preds <- augment(tree1_fit, new_data = fetal_health_test)
+
+#  Accuracy
+acc_test_tree <- yardstick::accuracy(
+  tree_test_preds,
+  truth = b_fetal_health,
+  estimate = .pred_class
+)
+
+#  Sensitivity (recall for abnormal cases)
+sens_test_tree <- yardstick::sens(
+  tree_test_preds,
+  truth = b_fetal_health,
+  estimate = .pred_class,
+  event_level = "second"
+)
+
+#  Specificity
+spec_test_tree <- yardstick::spec(
+  tree_test_preds,
+  truth = b_fetal_health,
+  estimate = .pred_class,
+  event_level = "second"
+)
+
+#  Combine results
+stats_test_tree1 <- bind_rows(
+  acc_test_tree,
+  sens_test_tree,
+  spec_test_tree
+) %>%
+  mutate(data = "test", model = "tree1")
+
+#  Confusion matrix
+cm_test_tree1 <- yardstick::conf_mat(
+  tree_test_preds,
+  truth = b_fetal_health,
+  estimate = .pred_class
+)
+
+#  Output
+stats_test_tree1
+cm_test_tree1
+
+
+```
+
+**QUESTION** Compare the results to what you got on the training data. Did the metrics get better or worse? Is this expected? Why? Is there evidence of overfitting? 
+
+Here's some code that could be useful in organizing and comparing the results.
+
+```{r tree_compare_soln}
+
+stats_tree1 <- bind_rows(stats_train_tree1, stats_test_tree1) %>%
+  dplyr::select(.metric, .estimate, data) %>%
+  tidyr::pivot_wider(names_from = data, values_from = .estimate)
+
+stats_tree1
+
+
+```
+
+
+> The decision tree has similar accuracy on the training (0.892) and test (0.880) sets, so it generalizes reasonably well overall. Sensitivity drops slightly from about 0.74 on the training data to 0.71 on the test data, meaning it misses a few more abnormal cases when applied to new patients. Specificity stays very high and almost unchanged (~0.94 vs ~0.93), so the tree is consistently good at identifying normal cases. Overall this suggests only mild overfitting, with the main weakness being a modest loss in ability to detect abnormal fetal health on unseen data.
+
+Now, we'll clean up the workspace a bit before trying the random forest.
+
+```{r}
+rm(tree1_fit)
+```
+
+### Model 3 - Random Forest
+
+Instead of using a simple decision tree, use a random forest. Obviously, you should now use all the variables that you think might be useful for predicting `b_fetal_health`.
+
+* fit the model on the training data,
+* assess the model's performance on the training data using the `augment()` function like we did for the decision tree,
+* use the model to make predictions on the test data and assess the model's performance on the test data using the `augment()` function,
+* create an importance plot to get a sense of the relative importance of the different variables,
+* discuss the results
+
+In your discussion of the results you should talk about things like:
+
+* how accurate is the model in predicting on the test data?
+* is their evidence of overfitting?
+* how does the model do in terms of other metrics like sensitivity and specificity?
+* how does the performance of the random forest compare to the simple decision tree?
+
+```{r rf_spec}
+
+rf_spec <- rand_forest() %>%
+  set_engine("randomForest", importance = TRUE, na.action = na.omit) %>%
+  set_mode("classification")
+
+```
+
+Fit the model
+
+```{r rf_fit}
+
+rf_fit <- fit(
+  rf_spec,
+  b_fetal_health ~ .,
+  data = fetal_health_train
+)
+
+```
+
+Compute accuracy, sensitivity and specificity for the fit.
+
+```{r rf_fit_metrics}
+
+rf_train_preds <- augment(rf_fit, new_data = fetal_health_train)
+
+acc_rf_train <- yardstick::accuracy(rf_train_preds, truth = b_fetal_health, estimate = .pred_class)
+sens_rf_train <- yardstick::sens(rf_train_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+spec_rf_train <- yardstick::spec(rf_train_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+
+rf_train_metrics <- bind_rows(acc_rf_train, sens_rf_train, spec_rf_train)
+rf_train_metrics
+
+```
+
+Let's look at an importance plot to get a sense of which variables seem to be influential.
+
+
+```{r}
+library(vip)
+vip(rf_fit$fit)
+
+```
+Now let's compute accuracy, sensitivity and specificity on the test data.
+
+```{r rf_test_metrics}
+
+rf_test_preds <- augment(rf_fit, new_data = fetal_health_test)
+
+acc_rf_test <- yardstick::accuracy(rf_test_preds, truth = b_fetal_health, estimate = .pred_class)
+sens_rf_test <- yardstick::sens(rf_test_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+spec_rf_test <- yardstick::spec(rf_test_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+
+rf_test_metrics <- bind_rows(acc_rf_test, sens_rf_test, spec_rf_test)
+rf_test_metrics
+
+```
+
+
+```{r}
+# Compute accuracy, sensitivity and specificity on training data
+rf_train_preds <- augment(rf_fit, new_data = fetal_health_train)
+
+acc_rf_train <- yardstick::accuracy(rf_train_preds, truth = b_fetal_health, estimate = .pred_class)
+sens_rf_train <- yardstick::sens(rf_train_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+spec_rf_train <- yardstick::spec(rf_train_preds, truth = b_fetal_health, estimate = .pred_class, event_level = "second")
+
+rf_train_metrics <- bind_rows(acc_rf_train, sens_rf_train, spec_rf_train)
+rf_train_metrics
+```
+
+```{r}
+# Combine for easy comparison
+rf_compare <- bind_rows(
+  rf_train_metrics %>% mutate(data = "train"),
+  rf_test_metrics %>% mutate(data = "test")
+) %>%
+  dplyr::select(.metric, .estimate, data) %>%
+  tidyr::pivot_wider(names_from = data, values_from = .estimate)
+
+rf_compare
+```
+
+How do test and train performance compare?
+
+> The random forest model demonstrates excellent predictive performance with very high training accuracy (≈0.999) and slightly lower but still strong test accuracy (≈0.944). The model’s sensitivity and specificity are both high, indicating it identifies most abnormal fetal cases while maintaining a low false-positive rate.
+The small drop from training to test performance suggests mild overfitting, which is expected given the model’s complexity, but it still generalizes very well overall. Compared to the decision tree, the random forest offers more balanced accuracy and robustness, handling variability in the data more effectively.
+
+```{r}
+rm(rf_fit)
+```
+
+## Final model comparisons
+
+So, if you had to recommend a model to consider using in practice, which of the models (if any) would you recommend and why?
+
+>When looking across all three models, you can clearly see the progression in performance as the models become more sophisticated. The logistic regression was a good starting point — it provided interpretable results and showed that a few key fetal heart rate variables are useful predictors, but it struggled to capture more complex patterns in the data.
+
+>The decision tree added flexibility by allowing nonlinear splits, which slightly improved the accuracy and sensitivity. However, it tended to overfit the training data a bit, meaning it wasn’t quite as reliable when predicting new cases.
+
+>Finally, the random forest stood out as the most balanced and consistent performer. It achieved very high training accuracy while still maintaining excellent test accuracy, suggesting it generalizes well without major overfitting. Its strong sensitivity and specificity mean it’s good at both catching abnormal cases and avoiding false alarms.
+
+>Recommendation:
+I’d recommend using the random forest model for predicting fetal health status. It provides the best overall performance and is robust even with complex or noisy data. It captures subtle relationships that the simpler models miss, making it a great option for practical prediction tasks.
+That said, if interpretability is crucial — for example, when explaining model results to clinicians — the logistic regression model would still be a solid choice. It’s easier to explain and justify individual predictions, even though it sacrifices a bit of predictive power.
